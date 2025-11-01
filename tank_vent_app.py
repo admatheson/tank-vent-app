@@ -1,69 +1,106 @@
-
 import streamlit as st
 import numpy as np
 import pyvista as pv
 from stpyvista import stpyvista
 
-st.set_page_config(page_title="C-NLOPB Tank Vent", layout="wide")
-pv.global_theme.background = 'white'
+st.set_page_config(page_title="C-NLOPB Tank Vent (ft)", layout="wide")
 
-def vol(o, L, D, H):
-    return np.pi * (D/2)**2 * (H if o=="Vertical" else L)
+st.title("C-NLOPB Tank Ventilation – Imperial (ft)")
+st.markdown("**12 Air Changes per Hour (ACH) – SOR/96-118**")
 
-st.title("C-NLOPB Tank Ventilation")
-c1, c2 = st.columns(2)
-with c1:
-    o = st.selectbox("Orientation", ["Vertical", "Horizontal"])
-    if o=="Vertical":
-        D = st.number_input("Diameter (m)",0.1,50.0,3.0)
-        H = st.number_input("Height (m)",0.1,100.0,10.0)
-        L = H
+col1, col2 = st.columns(2)
+
+with col1:
+    orientation = st.selectbox("Tank Orientation", ["Vertical", "Horizontal"])
+    if orientation == "Vertical":
+        diameter_ft = st.number_input("Diameter (ft)", 0.3, 160.0, 10.0)
+        height_ft = st.number_input("Height (ft)", 0.3, 330.0, 33.0)
+        length_ft = height_ft
     else:
-        L = st.number_input("Length (m)",0.1,100.0,15.0)
-        D = st.number_input("Diameter (m)",0.1,20.0,4.0)
-        H = D
-    V = vol(o,L,D,H)
-    st.metric("Volume",f"{V:,.1f} m³")
-    st.metric("Flow (12 ACH)",f"{V*12:,.0f} m³/h")
+        length_ft = st.number_input("Length (ft)", 0.3, 330.0, 50.0)
+        diameter_ft = st.number_input("Diameter (ft)", 0.3, 65.0, 13.0)
+        height_ft = diameter_ft
 
-with c2:
-    LL = L if o=="Horizontal" else H
-    HH = H if o=="Vertical" else D
+    volume_ft3 = 3.14159 * (diameter_ft/2)**2 * (height_ft if orientation == "Vertical" else length_ft)
+    flow_cfh = volume_ft3 * 12
+
+    st.metric("Tank Volume", f"{volume_ft3:,.1f} ft³")
+    st.metric("Required Flow Rate", f"{flow_cfh:,.0f} CFH")
+
+with col2:
+    L = length_ft if orientation == "Horizontal" else height_ft
+    H = height_ft if orientation == "Vertical" else diameter_ft
     inlet = np.array([
-        st.slider("Inlet X",-LL/2,LL/2,0.0,0.1),
-        st.slider("Inlet Y",-D/2,D/2,0.0,0.1),
-        st.slider("Inlet Z",-HH/2,HH/2,-HH/3,0.1)
+        st.slider("Inlet X (ft)", -L/2, L/2, 0.0, 0.3),
+        st.slider("Inlet Y (ft)", -diameter_ft/2, diameter_ft/2, 0.0, 0.3),
+        st.slider("Inlet Z (ft)", -H/2, H/2, -H/3, 0.3)
     ])
     outlet = np.array([
-        st.slider("Outlet X",-LL/2,LL/2,0.0,0.1),
-        st.slider("Outlet Y",-D/2,D/2,0.1),
-        st.slider("Outlet Z",-HH/2,HH/2,HH/3,0.1)
+        st.slider("Outlet X (ft)", -L/2, L/2, 0.0, 0.3),
+        st.slider("Outlet Y (ft)", -diameter_ft/2, diameter_ft/2, 0.3),
+        st.slider("Outlet Z (ft)", -H/2, H/2, H/3, 0.3)
     ])
 
-def field(i,o,res=25):
-    x,y,z = [np.linspace(-a/2,a/2,res) for a in (LL,D,HH)]
-    X,Y,Z = np.meshgrid(x,y,z,indexing='ij')
-    P = np.column_stack((X.ravel(),Y.ravel(),Z.ravel()))
+# Cell-centered velocity
+def field(i, o, res=25):
+    n = res - 1
+    if n < 1: n = 1
+    x = np.linspace(-L/2 + L/(2*n), L/2 - L/(2*n), n)
+    y = np.linspace(-diameter_ft/2 + diameter_ft/(2*n), diameter_ft/2 - diameter_ft/(2*n), n)
+    z = np.linspace(-H/2 + H/(2*n), H/2 - H/(2*n), n)
+    X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
+    P = np.column_stack((X.ravel(), Y.ravel(), Z.ravel()))
     V = np.zeros_like(P)
-    for p,s in zip([i,o],[1,-1]):
-        r = np.linalg.norm(P-p,axis=1,keepdims=True)+1e-6
-        V += s*(P-p)/(r**3)
-    g = pv.UniformGrid()
-    g.dimensions = (res,res,res)
-    g.spacing = (LL/(res-1),D/(res-1),HH/(res-1))
-    g.origin = (-LL/2,-D/2,-HH/2)
-    g.cell_data["V"] = V.astype(np.float32)
-    g.set_active_vectors("V")
-    return g
+    for p, s in zip([i, o], [1, -1]):
+        v = P - p
+        r = np.linalg.norm(v, axis=1, keepdims=True) + 1e-6
+        V += s * v / (r**3)
+    
+    grid = pv.ImageData()
+    grid.dimensions = (n+1, n+1, n+1)
+    grid.spacing = (L/n, diameter_ft/n, H/n)
+    grid.origin = (-L/2, -diameter_ft/2, -H/2)
+    grid.cell_data["velocity"] = V.astype(np.float32)
+    grid.set_active_vectors("velocity")
+    return grid
 
-g = field(inlet,outlet)
-s = g.streamlines_from_source(pv.PointSet(inlet+np.random.randn(80,3)*0.05),max_time=50)
-p = pv.Plotter()
-p.add_mesh(pv.Cylinder(radius=D/2,height=H if o=="Vertical" else L,resolution=40).rotate_z(90 if o=="Horizontal" else 0),color='lightblue',opacity=0.15)
-p.add_mesh(s,line_width=2,cmap='turbo')
-p.add_points(inlet,color='red',point_size=15)
-p.add_points(outlet,color='blue',point_size=15)
-stpyvista(p,height=500,key="flow")
+g = field(inlet, outlet)
+streamlines = g.streamlines_from_source(pv.PointSet(inlet + np.random.randn(80,3)*0.2), max_time=50)
 
-cov = np.mean(np.linalg.norm(g["V"],axis=1)>0.03)
-st.metric("Coverage",f"{cov*100:.1f}%")
+st.subheader("3D Air Flow Simulation")
+plotter = pv.Plotter()
+cyl = pv.Cylinder(radius=diameter_ft/2, height=height_ft if orientation=="Vertical" else length_ft, resolution=40)
+if orientation == "Horizontal":
+    cyl.rotate_z(90)
+plotter.add_mesh(cyl, color="lightblue", opacity=0.2)
+
+# FIXED: Use n_lines and get_line(i)
+for i in range(streamlines.n_lines):
+    line = streamlines.get_line(i)
+    if line.n_points > 1:
+        plotter.add_lines(line.points, color="orange", width=2)
+
+plotter.add_points(inlet, color="red", point_size=20)
+plotter.add_points(outlet, color="blue", point_size=20)
+stpyvista(plotter, height=500, key="flow")
+
+# Coverage
+cov = np.mean(np.linalg.norm(g["velocity"], axis=1) > 0.1)
+st.metric("Airflow Coverage", f"{cov*100:.1f}%")
+
+st.subheader("Download Report")
+report = f"""
+C-NLOPB Ventilation Report (Imperial)
+====================================
+Tank Type: {orientation} Cylindrical
+Dimensions: Length={length_ft:.1f} ft, Diameter={diameter_ft:.1f} ft, Height={height_ft:.1f} ft
+Volume: {volume_ft3:.1f} ft³
+Required Flow Rate: {flow_cfh:.0f} CFH (12 ACH)
+
+Inlet Location (ft): {inlet.round(2)}
+Outlet Location (ft): {outlet.round(2)}
+Airflow Coverage: {cov*100:.1f}%
+
+Compliant: {'Yes' if cov >= 0.85 else 'No – Improve placement'}
+"""
+st.download_button("Download Report (TXT)", report, "cnlopb_report_imperial.txt")
