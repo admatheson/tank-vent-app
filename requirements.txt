@@ -1,0 +1,6 @@
+
+streamlit
+numpy
+pyvista
+stpyvista
+scipy
